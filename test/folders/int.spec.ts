@@ -1,10 +1,13 @@
 import type { Payload } from 'payload'
 
 import path from 'path'
+import { createLocalReq, getFolderData } from 'payload'
+import { buildFolderWhereConstraints } from 'payload/shared'
 import { fileURLToPath } from 'url'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { initPayloadInt } from '../__helpers/shared/initPayloadInt.js'
+import { devUser } from '../credentials.js'
 
 let payload: Payload
 
@@ -422,6 +425,99 @@ describe('folders', () => {
 
       expect(returnedDocs?.some((doc) => (doc.value as any).title === 'Post 1')).toBe(true)
       expect(returnedDocs?.some((doc) => (doc.value as any).title === 'Post 2')).toBe(true)
+    })
+  })
+
+  describe('folder > drafts querying', () => {
+    const createdDraftIDs: (number | string)[] = []
+
+    afterEach(async () => {
+      for (const id of createdDraftIDs) {
+        await payload.delete({
+          id,
+          collection: 'drafts',
+        })
+      }
+      createdDraftIDs.length = 0
+    })
+
+    it('should reflect draft folder moves in the folder view without publishing', async () => {
+      const folderA = await payload.create({
+        collection: 'payload-folders',
+        data: { name: 'Folder A', folderType: ['drafts'] },
+      })
+      const folderB = await payload.create({
+        collection: 'payload-folders',
+        data: { name: 'Folder B', folderType: ['drafts'] },
+      })
+
+      const doc = await payload.create({
+        collection: 'drafts',
+        data: { _status: 'published', folder: folderA.id, title: 'Draft Folder Move' },
+      })
+      createdDraftIDs.push(doc.id)
+
+      // Move to folder B as a draft without publishing
+      await payload.update({
+        id: doc.id,
+        collection: 'drafts',
+        data: { folder: folderB.id },
+        draft: true,
+      })
+
+      const {
+        docs: [user],
+      } = await payload.find({
+        collection: 'users',
+        where: { email: { equals: devUser.email } },
+      })
+
+      const req = await createLocalReq({ user }, payload)
+      const draftsConfig = payload.collections.drafts.config
+      const foldersConfig = payload.collections['payload-folders'].config
+
+      const dataA = await getFolderData({
+        documentWhere: {
+          or: [
+            (await buildFolderWhereConstraints({
+              collectionConfig: draftsConfig,
+              folderID: folderA.id,
+              req,
+            }))!,
+          ],
+        },
+        folderID: folderA.id,
+        folderWhere: await buildFolderWhereConstraints({
+          collectionConfig: foldersConfig,
+          folderID: folderA.id,
+          req,
+        }),
+        req,
+        sort: 'name',
+      })
+
+      const dataB = await getFolderData({
+        documentWhere: {
+          or: [
+            (await buildFolderWhereConstraints({
+              collectionConfig: draftsConfig,
+              folderID: folderB.id,
+              req,
+            }))!,
+          ],
+        },
+        folderID: folderB.id,
+        folderWhere: await buildFolderWhereConstraints({
+          collectionConfig: foldersConfig,
+          folderID: folderB.id,
+          req,
+        }),
+        req,
+        sort: 'name',
+      })
+
+      expect(dataA.documents.map((item) => String(item.value.id))).not.toContain(String(doc.id))
+      expect(dataB.documents.map((item) => String(item.value.id))).toContain(String(doc.id))
     })
   })
 
