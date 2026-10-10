@@ -10,6 +10,7 @@ import {
   getQueryDraftsSort,
   type JoinQuery,
   type SanitizedCollectionConfig,
+  type Where,
 } from 'payload'
 import { fieldShouldBeLocalized, hasDraftsEnabled } from 'payload/shared'
 
@@ -19,6 +20,7 @@ import type { CollectionModel } from '../types.js'
 import { buildQuery } from '../queries/buildQuery.js'
 import { buildSortParam } from '../queries/buildSortParam.js'
 import { getCollection } from './getEntity.js'
+import { extractRelationToFilter, filterWhereForCollection } from './resolveJoins.js'
 
 type BuildJoinAggregationArgs = {
   adapter: MongooseAdapter
@@ -85,8 +87,17 @@ export const buildJoinAggregation = async ({
       where: whereJoin = {},
     } = joins?.[join.joinPath] || {}
 
+    // Filter the target collection if the query has an explicit relationTo constraint.
+    const allCollections = Array.isArray(join.field.collection)
+      ? join.field.collection
+      : [join.field.collection]
+    const relationToFilter = extractRelationToFilter(whereJoin)
+    const collectionsToQuery = relationToFilter
+      ? allCollections.filter((col) => relationToFilter.includes(col))
+      : allCollections
+
     const aggregatedFields: FlattenedField[] = []
-    for (const collectionSlug of join.field.collection) {
+    for (const collectionSlug of collectionsToQuery) {
       const { collectionConfig } = getCollection({ adapter, collectionSlug })
 
       for (const field of collectionConfig.flattenedFields) {
@@ -105,13 +116,6 @@ export const buildJoinAggregation = async ({
       timestamps: true,
     })
 
-    const $match = await buildQuery({
-      adapter,
-      fields: aggregatedFields,
-      locale,
-      where: whereJoin,
-    })
-
     const sortProperty = Object.keys(sort)[0]! // assert because buildSortParam always returns at least 1 key.
     const sortDirection = sort[sortProperty] === 'asc' ? 1 : -1
 
@@ -121,11 +125,52 @@ export const buildJoinAggregation = async ({
 
     const as = join.joinPath
 
-    for (const collectionSlug of join.field.collection) {
+    for (const collectionSlug of collectionsToQuery) {
+      const targetConfig = adapter.payload.collections[collectionSlug]?.config
+      if (!targetConfig) {
+        continue
+      }
+
+      const whereQuery = filterWhereForCollection(whereJoin, targetConfig.flattenedFields, true)
+
+      if (whereQuery === null) {
+        continue
+      }
+
+      const JoinModel: CollectionModel | undefined = adapter.collections[collectionSlug]
+
+      if (!JoinModel) {
+        continue
+      }
+
+      const targetFields = targetConfig.flattenedFields
+
+      const $match = await buildQuery({
+        adapter,
+        collectionSlug,
+        fields: targetFields,
+        locale,
+        where: whereQuery as Where,
+      })
+
       const alias = `${as}.docs.${collectionSlug}`
       aliases.push(alias)
 
-      const basePipeline = [
+      const foreignField = join.field.on
+
+      const matchConditions: Record<string, unknown>[] = [
+        {
+          $expr: {
+            $eq: [`$${foreignField}`, '$$root_id_'],
+          },
+        },
+      ]
+
+      if ($match && Object.keys($match).length > 0) {
+        matchConditions.push($match)
+      }
+
+      const basePipeline: Exclude<PipelineStage, PipelineStage.Merge | PipelineStage.Out>[] = [
         {
           $addFields: {
             relationTo: {
@@ -135,32 +180,35 @@ export const buildJoinAggregation = async ({
         },
         {
           $match: {
-            $and: [
-              {
-                $expr: {
-                  $eq: [`$${join.field.on}`, '$$root_id_'],
-                },
-              },
-              $match,
-            ],
+            $and: matchConditions,
           },
         },
       ]
 
-      const { Model: JoinModel } = getCollection({ adapter, collectionSlug })
+      // Sort calculation specific to this collection
+      const collectionSort = buildSortParam({
+        adapter,
+        config: adapter.payload.config,
+        fields: targetFields,
+        locale,
+        sort: sortJoin,
+        timestamps: true,
+      })
+      const collectionSortProperty = Object.keys(collectionSort)[0]!
+      const collectionSortDirection = collectionSort[collectionSortProperty] === 'asc' ? 1 : -1
 
       aggregate.push({
         $lookup: {
           as: alias,
           from: JoinModel.collection.name,
           let: {
-            root_id_: '$_id',
+            root_id_: versions ? '$parent' : '$_id',
           },
           pipeline: [
             ...basePipeline,
             {
               $sort: {
-                [sortProperty]: sortDirection,
+                [collectionSortProperty]: collectionSortDirection,
               },
             },
             {
@@ -169,11 +217,11 @@ export const buildJoinAggregation = async ({
             },
             {
               $project: {
+                relationTo: 1,
                 value: '$_id',
                 ...(projectSort && {
-                  [sortProperty]: 1,
+                  [sortProperty]: `$${sortProperty}`,
                 }),
-                relationTo: 1,
               },
             },
           ],
@@ -186,7 +234,7 @@ export const buildJoinAggregation = async ({
             as: `${as}.totalDocs.${alias}`,
             from: JoinModel.collection.name,
             let: {
-              root_id_: '$_id',
+              root_id_: versions ? '$parent' : '$_id',
             },
             pipeline: [
               ...basePipeline,
@@ -201,25 +249,31 @@ export const buildJoinAggregation = async ({
 
     aggregate.push({
       $addFields: {
-        [`${as}.docs`]: {
-          $concatArrays: aliases.map((alias) => `$${alias}`),
-        },
+        [`${as}.docs`]:
+          aliases.length > 0
+            ? {
+                $concatArrays: aliases.map((alias) => `$${alias}`),
+              }
+            : [],
       },
     })
 
     if (count) {
       aggregate.push({
         $addFields: {
-          [`${as}.totalDocs`]: {
-            $add: aliases.map((alias) => ({
-              $ifNull: [
-                {
-                  $first: `$${as}.totalDocs.${alias}.result`,
-                },
-                0,
-              ],
-            })),
-          },
+          [`${as}.totalDocs`]:
+            aliases.length > 0
+              ? {
+                  $add: aliases.map((alias) => ({
+                    $ifNull: [
+                      {
+                        $first: `$${as}.totalDocs.${alias}.result`,
+                      },
+                      0,
+                    ],
+                  })),
+                }
+              : 0,
         },
       })
     }
