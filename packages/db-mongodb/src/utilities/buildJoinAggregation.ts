@@ -174,6 +174,31 @@ export const buildJoinAggregation = async ({
 
       let foreignField = join.field.on
 
+      const localizationConfig = adapter.payload.config.localization
+      const effectiveLocale =
+        locale ||
+        (typeof localizationConfig === 'object' &&
+          localizationConfig &&
+          localizationConfig.defaultLocale)
+
+      // Handle localized fields.
+      if (effectiveLocale && typeof localizationConfig === 'object' && localizationConfig) {
+        const pathSegments = join.field.on.split('.')
+        const transformedSegments: string[] = []
+
+        for (let i = 0; i < pathSegments.length; i++) {
+          const segment = pathSegments[i]!
+          transformedSegments.push(segment)
+
+          const fieldAtSegment = targetFields.find((f) => f.name === segment)
+
+          if (fieldAtSegment && fieldAtSegment.localized) {
+            transformedSegments.push(effectiveLocale)
+          }
+        }
+        foreignField = transformedSegments.join('.')
+      }
+
       if (useDrafts) {
         foreignField = `version.${foreignField}`
       }
