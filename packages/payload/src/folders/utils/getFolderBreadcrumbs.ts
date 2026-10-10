@@ -21,6 +21,7 @@ export const getFolderBreadcrumbs = async ({
     const folderQuery = await payload.find({
       collection: payload.config.folders.slug,
       depth: 0,
+      draft: true,
       limit: 1,
       overrideAccess: false,
       req,

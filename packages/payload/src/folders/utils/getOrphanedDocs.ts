@@ -38,6 +38,7 @@ export async function getOrphanedDocs({
 
   const orphanedFolders = await payload.find({
     collection: collectionSlug,
+    draft: true,
     limit: 0,
     overrideAccess: false,
     req,

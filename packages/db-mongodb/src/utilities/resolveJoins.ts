@@ -21,6 +21,8 @@ export type ResolveJoinsArgs = {
   collectionSlug: string
   /** Array of documents to resolve joins for */
   docs: Record<string, unknown>[]
+  /** Whether drafts are enabled on the query */
+  draftsEnabled?: boolean
   /** Join query specifications (which joins to resolve and how) */
   joins?: JoinQuery
   /** Optional locale for localized queries */
@@ -40,6 +42,7 @@ export async function resolveJoins({
   adapter,
   collectionSlug,
   docs,
+  draftsEnabled = false,
   joins,
   locale,
   projection,
@@ -126,7 +129,7 @@ export async function resolveJoins({
         return null
       }
 
-      const useDrafts = versions && Boolean(targetConfig.versions?.drafts)
+      const useDrafts = (versions || draftsEnabled) && Boolean(targetConfig.versions?.drafts)
       let JoinModel
       if (useDrafts) {
         JoinModel = adapter.versions[targetConfig.slug]
@@ -462,7 +465,7 @@ export async function resolveJoins({
  * @param where - The WHERE clause to search
  * @returns Array of collection slugs if relationTo filter found, null otherwise
  */
-function extractRelationToFilter(where: Record<string, unknown>): null | string[] {
+export function extractRelationToFilter(where: Record<string, unknown>): null | string[] {
   if (!where || typeof where !== 'object') {
     return null
   }
@@ -516,7 +519,7 @@ function extractRelationToFilter(where: Record<string, unknown>): null | string[
  * @param excludeRelationTo - Whether to exclude relationTo field (for individual collections)
  * @returns A filtered WHERE clause, or null if the query cannot match this collection
  */
-function filterWhereForCollection(
+export function filterWhereForCollection(
   where: Record<string, unknown>,
   availableFields: Array<{ name: string }>,
   excludeRelationTo: boolean = false,
