@@ -131,32 +131,52 @@ export const buildJoinAggregation = async ({
         continue
       }
 
+      const useDrafts = (draftsEnabled || versions) && hasDraftsEnabled(targetConfig)
+
       const whereQuery = filterWhereForCollection(whereJoin, targetConfig.flattenedFields, true)
 
       if (whereQuery === null) {
         continue
       }
 
-      const JoinModel: CollectionModel | undefined = adapter.collections[collectionSlug]
+      const JoinModel: CollectionModel | undefined = useDrafts
+        ? adapter.versions[collectionSlug]
+        : adapter.collections[collectionSlug]
 
       if (!JoinModel) {
         continue
       }
 
-      const targetFields = targetConfig.flattenedFields
+      const targetFields = useDrafts
+        ? buildVersionCollectionFields(adapter.payload.config, targetConfig, true)
+        : targetConfig.flattenedFields
 
-      const $match = await buildQuery({
-        adapter,
-        collectionSlug,
-        fields: targetFields,
-        locale,
-        where: whereQuery as Where,
-      })
+      const $match = useDrafts
+        ? await JoinModel.buildQuery({
+            locale,
+            payload: adapter.payload,
+            where: combineQueries(appendVersionToQueryKey(whereQuery as Where), {
+              latest: {
+                equals: true,
+              },
+            }),
+          })
+        : await buildQuery({
+            adapter,
+            collectionSlug,
+            fields: targetFields,
+            locale,
+            where: whereQuery as Where,
+          })
 
       const alias = `${as}.docs.${collectionSlug}`
       aliases.push(alias)
 
-      const foreignField = join.field.on
+      let foreignField = join.field.on
+
+      if (useDrafts) {
+        foreignField = `version.${foreignField}`
+      }
 
       const matchConditions: Record<string, unknown>[] = [
         {
@@ -191,7 +211,9 @@ export const buildJoinAggregation = async ({
         config: adapter.payload.config,
         fields: targetFields,
         locale,
-        sort: sortJoin,
+        sort: useDrafts
+          ? getQueryDraftsSort({ collectionConfig: targetConfig, sort: sortJoin })
+          : sortJoin,
         timestamps: true,
       })
       const collectionSortProperty = Object.keys(collectionSort)[0]!
@@ -218,9 +240,9 @@ export const buildJoinAggregation = async ({
             {
               $project: {
                 relationTo: 1,
-                value: '$_id',
+                value: useDrafts ? '$parent' : '$_id',
                 ...(projectSort && {
-                  [sortProperty]: `$${sortProperty}`,
+                  [sortProperty]: useDrafts ? `$version.${sortProperty}` : `$${sortProperty}`,
                 }),
               },
             },
