@@ -203,10 +203,35 @@ export const buildJoinAggregation = async ({
         foreignField = `version.${foreignField}`
       }
 
+      // Handle polymorphic relationship (relationTo is an array).
+      const relationshipField = targetConfig.flattenedFields.find((f) => f.name === join.field.on)
+      const isPolymorphicRelation =
+        relationshipField &&
+        'relationTo' in relationshipField &&
+        Array.isArray(relationshipField.relationTo)
+
+      let foreignExpr: Record<string, unknown>
+      if (isPolymorphicRelation) {
+        const foreignRelationToField = useDrafts
+          ? `version.${join.field.on}.relationTo`
+          : `${join.field.on}.relationTo`
+
+        foreignExpr = {
+          $and: [
+            { $eq: [`$${foreignField}.value`, '$$root_id_'] },
+            { $eq: [`$${foreignRelationToField}`, collection] },
+          ],
+        }
+      } else {
+        foreignExpr = {
+          $eq: [`$${foreignField}`, '$$root_id_'],
+        }
+      }
+
       const matchConditions: Record<string, unknown>[] = [
         {
           $expr: {
-            $eq: [`$${foreignField}`, '$$root_id_'],
+            $eq: foreignExpr,
           },
         },
       ]
